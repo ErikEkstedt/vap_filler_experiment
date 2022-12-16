@@ -718,12 +718,25 @@ class Experiment:
     def to_frames(self, t):
         return round(t * self.frame_hz)
 
-    def find_cross(self, p, cutoff=0.5):
+    def find_cross(self, p, cross_frames=1, cutoff=0.5):
         assert p.ndim == 1, f"Expects (n_frames,) got {p.shape}"
         cross_idx = torch.where(p <= cutoff)[0]
         cross = -1
         if len(cross_idx) > 0:
             cross = cross_idx[0].cpu().item()
+
+        p = p_now[fill_idx, 1000:]
+        cutoff = 0.5
+        cross_frames = 3
+        cross_idx = torch.where(p <= cutoff)[0]
+        if cross_frames > 1:
+            cuf = cross_idx.unfold(0, cross_frames, step=1)
+            diffs = (cuf[:, 1:] - cuf[:, :-1]).sum(-1) == (cross_frames - 1)
+            idx = torch.where(diffs)[0][0]
+            cross = cross_idx[idx].item()
+        else:
+            cross = cross_idx[0].item()
+
         return cross
 
     def get_filler_omission_sample(self, filler):
@@ -791,13 +804,13 @@ class Experiment:
         # Extract crosses
         p_now_filler = out["p_now"][0, filler_end_frame:, speaker_idx]
         p_fut_filler = out["p_future"][0, filler_end_frame:, speaker_idx]
-        filler_now_cross = exp.find_cross(p_now_filler)
-        filler_fut_cross = exp.find_cross(p_fut_filler)
+        filler_now_cross = exp.find_cross(p_now_filler, cross_frames=1)
+        filler_fut_cross = exp.find_cross(p_fut_filler, cross_frames=1)
 
         p_now_omission = out["p_now"][1, filler_start_frame:, speaker_idx]
         p_fut_omission = out["p_future"][1, filler_start_frame:, speaker_idx]
-        omission_now_cross = exp.find_cross(p_now_omission)
-        omission_fut_cross = exp.find_cross(p_fut_omission)
+        omission_now_cross = exp.find_cross(p_now_omission, cross_frames=1)
+        omission_fut_cross = exp.find_cross(p_fut_omission, cross_frames=1)
 
         return {
             "filler_now_cross": filler_now_cross,
@@ -884,7 +897,9 @@ class Experiment:
         sdf = exp.fill_df[exp.fill_df["session"] == session]
         return sdf[sdf["speaker"] == speaker]
 
-    def get_batch_crosses(self, x, sil_start_frames, channel, include_probs=False):
+    def get_batch_crosses(
+        self, x, sil_start_frames, channel, cross_frames=1, include_probs=False
+    ):
         now_crosses, fut_crosses = [], []
         all_p_now, all_p_fut = [], []
 
@@ -899,8 +914,8 @@ class Experiment:
                     all_p_now.append(p_now)
                     all_p_fut.append(p_fut)
 
-                now_cross_idx = self.find_cross(p_now[sil_start:])
-                fut_cross_idx = self.find_cross(p_fut[sil_start:])
+                now_cross_idx = self.find_cross(p_now[sil_start:], cross_frames)
+                fut_cross_idx = self.find_cross(p_fut[sil_start:], cross_frames)
                 now_crosses.append(now_cross_idx)
                 fut_crosses.append(fut_cross_idx)
         else:
@@ -922,8 +937,8 @@ class Experiment:
                         all_p_now.append(p_now)
                         all_p_fut.append(p_fut)
 
-                    now_cross_idx = self.find_cross(p_now[sil_start:])
-                    fut_cross_idx = self.find_cross(p_fut[sil_start:])
+                    now_cross_idx = self.find_cross(p_now[sil_start:], cross_frames)
+                    fut_cross_idx = self.find_cross(p_fut[sil_start:], cross_frames)
                     now_crosses.append(now_cross_idx)
                     fut_crosses.append(fut_cross_idx)
                 ii += n
@@ -1096,20 +1111,20 @@ class Result:
 
     @staticmethod
     def survival_qy(df, max_silence_frames=250):
-        Q = df[df["is_filler"] == 0]
+        Q = df[df["q_is_filler"] == 0]
         Q.loc[:, "event"] = True
-        Q.loc[Q["now_cross"] < 0, "event"] = False
-        Q.loc[Q["now_cross"] < 0, "now_cross"] = max_silence_frames
+        Q.loc[Q["q_now_cross"] < 0, "event"] = False
+        Q.loc[Q["q_now_cross"] < 0, "q_now_cross"] = max_silence_frames
 
-        F = df[df["is_filler"] == 1]
+        F = df[df["q_is_filler"] == 1]
         F.loc[:, "event"] = True
-        F.loc[F["now_cross"] < 0, "event"] = False
-        F.loc[F["now_cross"] < 0, "now_cross"] = max_silence_frames
+        F.loc[F["q_now_cross"] < 0, "event"] = False
+        F.loc[F["q_now_cross"] < 0, "q_now_cross"] = max_silence_frames
 
         # Survival plot
-        t_qy, p_qy = kaplan_meier_estimator(event=Q["event"], time_exit=Q["now_cross"])
+        t_qy, p_qy = kaplan_meier_estimator(event=Q["event"], time_exit=Q["q_now_cross"])
         t_qy_filler, p_qy_filler = kaplan_meier_estimator(
-            event=F["event"], time_exit=F["now_cross"]
+            event=F["event"], time_exit=F["q_now_cross"]
         )
         Result.plot_survival(
             [t_qy, p_qy, t_qy_filler, p_qy_filler], title="QY + Fillers"
@@ -1172,6 +1187,8 @@ class Result:
             origin="lower",
             extent=[xmin, xmax, ymin, ymax],
         )
+        ax[0].set_yticks([])
+        ax[1].set_yticks([])
 
     @staticmethod
     def plot_speaker_probs(x, p, ax, label="P", alpha=0.6, colors=["b", "orange"]):
@@ -1184,6 +1201,8 @@ class Result:
             x, px, z, where=px < 0, color=colors[1], label=f"B {label}", alpha=alpha
         )
         ax.set_ylim([-0.5, 0.5])
+        ax.set_yticks([-0.25, 0.25])
+        ax.set_yticklabels(["B", "A"])
         return ax
 
     @staticmethod
@@ -1263,12 +1282,13 @@ class Result:
         rel_filler_start,
         rel_filler_end,
         filler,
+        filler_start,
         plabel=["Filler", "Omission"],
         vad=None,
         word_dict=None,
         sample_rate=16_000,
         frame_hz=50,
-        fontsize=12,
+        figsize=(12, 8),
         plot=False,
     ):
         assert (
@@ -1289,37 +1309,53 @@ class Result:
         channel = 0 if speaker == "A" else 1
         other_channel = 0 if channel == 1 else 1
 
-        fig, ax = plt.subplots(4, 1, sharex=True)
+        fig, ax = plt.subplots(4, 1, sharex=True, figsize=figsize)
+
+        # Melspectrogram
         Result.plot_mel_spectrogram(
             waveform,
             ax=[ax[channel], ax[other_channel]],
             sample_rate=sample_rate,
             hop_time=0.01,
         )
-        ax[0].set_yticks([])
-        ax[1].set_yticks([])
         if vad is not None:
             Result.plot_vad(time, vad[:, channel], ax[0], label="VAD")
             Result.plot_vad(time, vad[:, other_channel], ax[1])
 
+        # Words
         if word_dict is not None:
-            ymin, ymax = ax[0].get_ylim()
-            span = ymax - ymin
-            mid = ymin + span / 2
-            for s, e, w in zip(
-                word_dict["starts"], word_dict["ends"], word_dict["words"]
-            ):
-                x_mid = s + (e - s)
-                x_text = x_mid - rel_filler_start
-                ax[0].text(x_text, y=mid, s=w, fontsize=fontsize, color="w")
+            t0 = filler_start - rel_filler_start
+            ys = [50, 40, 30, 20, 10]
+            n_rows = len(ys)
 
-        # Model out
-        Result.plot_speaker_probs(time, p_filler, ax[2], label=plabel[0] + f" ({filler})")
+            jj = 0
+            for s, e, w in zip(
+                word_dict["starts"],
+                word_dict["ends"],
+                word_dict["words"],
+            ):
+
+                row_idx = jj % n_rows
+                y = ys[row_idx]
+                jj += 1
+                rel_start = s - t0
+                x_mid = rel_start + (e - s) / 2
+                ax[0].text(
+                    x=x_mid,
+                    y=y,
+                    s=w,
+                    fontsize=14,
+                    color="w",
+                    rotation=20,
+                    fontweight='bold',
+                    horizontalalignment="center",
+                )
+
+        # Turn-shift probabilitiesout
+        Result.plot_speaker_probs(
+            time, p_filler, ax[2], label=plabel[0] + f" ({filler})"
+        )
         Result.plot_speaker_probs(time, p_omission, ax[3], label=plabel[1])
-        ax[2].set_yticks([-0.25, 0.25])
-        ax[3].set_yticks([-0.25, 0.25])
-        ax[2].set_yticklabels(["B", "A"])
-        ax[3].set_yticklabels(["B", "A"])
 
         # Show filler boundaries
         ax[0].axvline(rel_filler_start, color="r", linestyle="dashed")
@@ -1379,8 +1415,162 @@ class Result:
             plt.pause(0.01)
         return fig, ax
 
+    @staticmethod
+    def plot_experiment2_addition(
+        waveform,
+        p,
+        p_addition,
+        speaker,
+        cross,
+        cross_add,
+        rel_filler_start,
+        rel_filler_end,
+        abs_end,
+        filler,
+        plabel=["QY", "QY+F"],
+        vad=None,
+        word_dict=None,
+        sample_rate=16_000,
+        frame_hz=50,
+        plot=False,
+        figsize=(12,8)
+    ):
+        """
+        waveform:   waveform including the additive filler
+        p:          probs of regular (no-filler) output
+        p_addition: probs of added filler output
+        speaker:    active speaker
+        """
+        assert (
+            waveform.ndim == 2
+        ), f"Expected waveform (C, N_SAMPLES) got {waveform.shape}"
+
+        if p is not None:
+            assert p.ndim == 1, f"Expected p (N_FRAMES) got {p.shape}"
+
+        if p_addition is not None:
+            assert (
+                p_addition.ndim == 1
+            ), f"Expected p_addition (N_FRAMES,) got {p_addition.shape}"
+
+        if isinstance(rel_filler_start, torch.Tensor):
+            rel_filler_start = rel_filler_start.item()
+
+        if isinstance(rel_filler_end, torch.Tensor):
+            rel_filler_end = rel_filler_end.item()
+
+        time = torch.arange(len(p_addition)) / frame_hz
+        channel = 0 if speaker == "A" else 1
+        other_channel = 0 if channel == 1 else 1
+
+        fig, ax = plt.subplots(4, 1, sharex=True, figsize=figsize)
+
+        # MelSpectrogram
+        Result.plot_mel_spectrogram(
+            waveform,
+            ax=[ax[channel], ax[other_channel]],
+            sample_rate=sample_rate,
+            hop_time=0.01,
+        )
+        if vad is not None:
+            Result.plot_vad(time, vad[:, channel], ax[0], label="VAD")
+            Result.plot_vad(time, vad[:, other_channel], ax[1])
+
+        # Words
+        if word_dict is not None:
+            t0 = abs_end - rel_filler_start
+            ys = [50, 40, 30, 20, 10]
+            n_rows = len(ys)
+
+            jj = 0
+            for s, e, w in zip(
+                word_dict["starts"],
+                word_dict["ends"],
+                word_dict["words"],
+            ):
+                row_idx = jj % n_rows
+                y = ys[row_idx]
+                jj += 1
+                rel_start = s - t0
+                x_mid = rel_start + (e - s) / 2
+                ax[0].text(
+                    x=x_mid,
+                    y=y,
+                    s=w,
+                    fontsize=14,
+                    color="w",
+                    rotation=20,
+                    fontweight='bold',
+                    horizontalalignment="center",
+                )
+
+        # Model out
+        Result.plot_speaker_probs(time, p, ax[2], label=plabel[0])
+        Result.plot_speaker_probs(
+            time, p_addition, ax[3], label=plabel[1] + f" ({filler})"
+        )
+
+        # Show filler boundaries
+        ax[0].axvline(rel_filler_start, color="r", linestyle="dashed")
+        ax[0].axvline(rel_filler_end, color="r")
+        ax[1].axvline(rel_filler_start, color="r", linestyle="dashed")
+        ax[1].axvline(rel_filler_end, color="r")
+        ax[2].axvline(rel_filler_start, color="r", linestyle="dashed")
+        ax[3].axvline(rel_filler_start, color="r", linestyle="dashed")
+        ax[3].axvline(rel_filler_end, color="r")
+
+        # Show cross duration arrows
+        ############################################
+        y_arrow = -0.25
+        if cross >= 0:
+            x_start = rel_filler_start
+            dx = cross / 50
+            x_end = x_start + dx
+            mid = x_start + dx / 2
+            ax[-2].hlines(y=y_arrow, xmin=x_start, xmax=x_end, color="k")
+            ax[-2].vlines(
+                x=[x_start, x_end], ymin=y_arrow - 0.1, ymax=y_arrow + 0.1, color="k"
+            )
+            ax[-2].text(
+                x=mid,
+                y=y_arrow + 0.05,
+                s=f"{round(dx, 2)}s",
+                horizontalalignment="center",
+            )
+        ############################################
+        if cross_add >= 0:
+            x_start = rel_filler_end
+            dx = cross_add / frame_hz
+            x_end = x_start + dx
+            mid = x_start + dx / 2
+            ax[-1].hlines(y=y_arrow, xmin=x_start, xmax=x_end, color="k")
+            ax[-1].vlines(
+                x=[x_start, x_end], ymin=y_arrow - 0.1, ymax=y_arrow + 0.1, color="k"
+            )
+            ax[-1].text(
+                x=mid,
+                y=y_arrow + 0.05,
+                s=f"{round(dx, 2)}s",
+                horizontalalignment="center",
+            )
+        ############################################
+
+        from_ax = 0
+        if vad is None:
+            from_ax = 2
+        for a in ax[from_ax:]:
+            a.legend()
+
+        plt.subplots_adjust(
+            left=0.05, bottom=None, right=0.99, top=0.99, wspace=0.01, hspace=0.05
+        )
+        if plot:
+            plt.pause(0.01)
+        return fig, ax
+
 
 def visualize_debuggin():
+    """must play around somewhere"""
 
     ##########################################
     # Experiment 1. Omission
@@ -1400,12 +1590,12 @@ def visualize_debuggin():
         )
         if crosses["filler_now_cross"] == -1 and crosses["omit_now_cross"] == -1:
             continue
-
         ###########################################
         # Plot the output from the model
         ###########################################
         channel = 0 if sample.speaker == "A" else 1
         p_now = out["p_now"][..., channel].cpu()
+        utt = exp.utt_df[exp.utt_df["utt_idx"] == sample.utt_idx].iloc[0]
         fig, ax = Result.plot_experiment1_omission(
             x[0],
             p_filler=p_now[0],
@@ -1416,41 +1606,87 @@ def visualize_debuggin():
             cross_fill=crosses["filler_now_cross"],
             cross_omit=crosses["omit_now_cross"],
             filler=sample.filler,
+            filler_start=sample.start,
+            word_dict={
+                "starts": utt.starts[: sample.utt_loc + 1],
+                "ends": utt.ends[: sample.utt_loc + 1],
+                "words": utt.words[: sample.utt_loc + 1],
+            },
+            figsize=(12, 8),
         )
-        ax[-1].set_xlim([15, 30])
+        ax[-1].set_xlim([17, 30])
         ############################################
         plt.show()
-        # plt.pause(0.01)
 
     ##########################################
     # Experiment 2. Addition
     ##########################################
-    # Experiment 2 visualization
     exp = Experiment()
     exp.load_model()
-    qy_df = pd.read_csv("results/exp2_qy.csv")
-    # experiment2_out = Result.survival_qy(qy_df)
+
+    qy_df = load_dataframe("results/exp2_qy.csv")
+    qy_df = load_dataframe("results/exp2_qy.csv")
+
+    def _text(x):
+        return [a[1:-1] for a in x.strip("][").split(", ")]
+
+    converters = {
+        "da": _text,
+        "da_boi": _text,
+        "words": _text,
+    }
+    df = pd.read_csv("results/exp2_qy.csv", converters=converters)
+
     Q = qy_df[qy_df["q_is_filler"] == 0]
-
-    # Choose a QY utterance
-    qq = Q.iloc[3]
-
-    # Find fillers used for that QY
     F = qy_df[qy_df["q_is_filler"] == 1]
-    fillers = F[F["q_idx"] == qq.q_idx]
-    # Get model outputs
-    channel = 0 if qq.speaker == "A" else 1
-    x, sil_start_frames = exp.get_filler_addition_sample(qq, fillers)
-    now_crosses, fut_crosses, p_now, p_fut = exp.get_batch_crosses(
-        x, sil_start_frames, channel, include_probs=True
-    )
-    print("p_now: ", tuple(p_now.shape))
 
-    fig, ax = Result.plot_one_dialog_two_predicions(
-        x[0], p1=p_now[0], p2=p_now[4], plabel=["Q", "Q+F"]
-    )
-    ax[-1].set_xlim([15, 25])
-    plt.show()
+    for ii in range(14, len(Q)):
+        # Choose a QY utterance
+        sample = Q.iloc[ii]
+        # Find fillers used for that QY
+        fillers = F[F["q_idx"] == sample.q_idx]
+        x, sil_start_frames = exp.get_filler_addition_sample(sample, fillers)
+        channel = 0 if sample.speaker == "A" else 1
+        now_crosses, _, p_now, _ = exp.get_batch_crosses(
+            x, sil_start_frames, channel, include_probs=True
+        )
+        print("p_now: ", tuple(p_now.shape))
+        # Loop over all filler additions
+        for fill_idx in range(1, len(p_now)):
+            rel_filler_start = sil_start_frames[0].item() / exp.frame_hz
+            rel_filler_end = sil_start_frames[fill_idx].item() / exp.frame_hz
+            filler = fillers.iloc[fill_idx - 1]
+            word_dict={
+                "starts": json.loads(sample.starts),
+                "ends": json.loads(sample.ends),
+                "words": _text(sample.words),
+            }
+            fig, ax = Result.plot_experiment2_addition(
+                x[fill_idx],
+                p=p_now[0],
+                p_addition=p_now[fill_idx],
+                speaker=sample.speaker,
+                cross=now_crosses[0],
+                cross_add=now_crosses[fill_idx],
+                rel_filler_start=20,
+                rel_filler_end=rel_filler_end,
+                abs_end=word_dict['ends'][-1],
+                filler=filler.filler,
+                word_dict=word_dict,
+                figsize=(12, 8)
+            )
+            stime = word_dict['starts'][0] - word_dict['ends'][-1] + 20 - 0.2
+            ax[-1].set_xlim([stime, 25])
+            plt.show()
+
+
+    return cross
+
+
+
+    cross = -1
+    if len(cross_idx) > 0:
+        cross = cross_idx[0].cpu().item()
 
 
 if __name__ == "__main__":
