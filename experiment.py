@@ -655,6 +655,7 @@ class Experiment:
         self,
         silence=10,
         context=20,
+        cross_frames=1,
         max_batch=5,
         qy_max_shift_time=5,
         utt_path="data/utterances.csv",
@@ -671,6 +672,7 @@ class Experiment:
 
         self.silence = silence
         self.context = context
+        self.cross_frames = cross_frames
         self.qy_max_shift_frames = round(self.frame_hz * qy_max_shift_time)
 
         self.audio_root = audio_root
@@ -720,23 +722,17 @@ class Experiment:
 
     def find_cross(self, p, cross_frames=1, cutoff=0.5):
         assert p.ndim == 1, f"Expects (n_frames,) got {p.shape}"
+
         cross_idx = torch.where(p <= cutoff)[0]
         cross = -1
         if len(cross_idx) > 0:
-            cross = cross_idx[0].cpu().item()
-
-        p = p_now[fill_idx, 1000:]
-        cutoff = 0.5
-        cross_frames = 3
-        cross_idx = torch.where(p <= cutoff)[0]
-        if cross_frames > 1:
-            cuf = cross_idx.unfold(0, cross_frames, step=1)
-            diffs = (cuf[:, 1:] - cuf[:, :-1]).sum(-1) == (cross_frames - 1)
-            idx = torch.where(diffs)[0][0]
-            cross = cross_idx[idx].item()
-        else:
-            cross = cross_idx[0].item()
-
+            if cross_frames > 1:
+                cuf = cross_idx.unfold(0, cross_frames, step=1)
+                diffs = (cuf[:, 1:] - cuf[:, :-1]).sum(-1) == (cross_frames - 1)
+                idx = torch.where(diffs)[0][0]
+                cross = cross_idx[idx].cpu().item()
+            else:
+                cross = cross_idx[0].cpu().item()
         return cross
 
     def get_filler_omission_sample(self, filler):
@@ -804,13 +800,18 @@ class Experiment:
         # Extract crosses
         p_now_filler = out["p_now"][0, filler_end_frame:, speaker_idx]
         p_fut_filler = out["p_future"][0, filler_end_frame:, speaker_idx]
-        filler_now_cross = exp.find_cross(p_now_filler, cross_frames=1)
-        filler_fut_cross = exp.find_cross(p_fut_filler, cross_frames=1)
+
+        filler_now_cross = self.find_cross(p_now_filler, cross_frames=self.cross_frames)
+        filler_fut_cross = self.find_cross(p_fut_filler, cross_frames=self.cross_frames)
 
         p_now_omission = out["p_now"][1, filler_start_frame:, speaker_idx]
         p_fut_omission = out["p_future"][1, filler_start_frame:, speaker_idx]
-        omission_now_cross = exp.find_cross(p_now_omission, cross_frames=1)
-        omission_fut_cross = exp.find_cross(p_fut_omission, cross_frames=1)
+        omission_now_cross = self.find_cross(
+            p_now_omission, cross_frames=self.cross_frames
+        )
+        omission_fut_cross = self.find_cross(
+            p_fut_omission, cross_frames=self.cross_frames
+        )
 
         return {
             "filler_now_cross": filler_now_cross,
@@ -1013,7 +1014,7 @@ class Experiment:
                     channel = 0 if utt.speaker == "A" else 1
                     x, sil_start_frames = self.get_filler_addition_sample(utt, fillers)
                     now_crosses, fut_crosses = self.get_batch_crosses(
-                        x, sil_start_frames, channel
+                        x, sil_start_frames, channel, cross_frames=self.cross_frames
                     )
 
                     # Check if QY was considered a shift by the model
@@ -1122,7 +1123,9 @@ class Result:
         F.loc[F["q_now_cross"] < 0, "q_now_cross"] = max_silence_frames
 
         # Survival plot
-        t_qy, p_qy = kaplan_meier_estimator(event=Q["event"], time_exit=Q["q_now_cross"])
+        t_qy, p_qy = kaplan_meier_estimator(
+            event=Q["event"], time_exit=Q["q_now_cross"]
+        )
         t_qy_filler, p_qy_filler = kaplan_meier_estimator(
             event=F["event"], time_exit=F["q_now_cross"]
         )
@@ -1347,7 +1350,7 @@ class Result:
                     fontsize=14,
                     color="w",
                     rotation=20,
-                    fontweight='bold',
+                    fontweight="bold",
                     horizontalalignment="center",
                 )
 
@@ -1433,7 +1436,7 @@ class Result:
         sample_rate=16_000,
         frame_hz=50,
         plot=False,
-        figsize=(12,8)
+        figsize=(12, 8),
     ):
         """
         waveform:   waveform including the additive filler
@@ -1500,7 +1503,7 @@ class Result:
                     fontsize=14,
                     color="w",
                     rotation=20,
-                    fontweight='bold',
+                    fontweight="bold",
                     horizontalalignment="center",
                 )
 
@@ -1656,7 +1659,7 @@ def visualize_debuggin():
             rel_filler_start = sil_start_frames[0].item() / exp.frame_hz
             rel_filler_end = sil_start_frames[fill_idx].item() / exp.frame_hz
             filler = fillers.iloc[fill_idx - 1]
-            word_dict={
+            word_dict = {
                 "starts": json.loads(sample.starts),
                 "ends": json.loads(sample.ends),
                 "words": _text(sample.words),
@@ -1670,19 +1673,16 @@ def visualize_debuggin():
                 cross_add=now_crosses[fill_idx],
                 rel_filler_start=20,
                 rel_filler_end=rel_filler_end,
-                abs_end=word_dict['ends'][-1],
+                abs_end=word_dict["ends"][-1],
                 filler=filler.filler,
                 word_dict=word_dict,
-                figsize=(12, 8)
+                figsize=(12, 8),
             )
-            stime = word_dict['starts'][0] - word_dict['ends'][-1] + 20 - 0.2
+            stime = word_dict["starts"][0] - word_dict["ends"][-1] + 20 - 0.2
             ax[-1].set_xlim([stime, 25])
             plt.show()
 
-
     return cross
-
-
 
     cross = -1
     if len(cross_idx) > 0:
@@ -1707,9 +1707,12 @@ if __name__ == "__main__":
         print("Experiment 1")
         exp = Experiment()
         omission_df = exp.experiment_omit_fillers()
-        omission_df.to_csv("results/exp1_omission.csv", index=False)
-
-    experiment1_out = Result.survival_omission(omission_df)
+        if exp.cross_frames > 1:
+            omission_df.to_csv(
+                f"results/exp1_{exp.cross_frames}_omission.csv", index=False
+            )
+        else:
+            omission_df.to_csv("results/exp1_omission.csv", index=False)
 
     # Experiment 2
     if exists("results/exp2_qy.csv"):
@@ -1718,6 +1721,10 @@ if __name__ == "__main__":
         print("Experiment 2")
         exp = Experiment()
         qy_df = exp.experiment_qy_fillers()
-        qy_df.to_csv("results/exp2_qy.csv", index=False)
+        if exp.cross_frames > 1:
+            qy_df.to_csv(f"results/exp2_{exp.cross_frames}_qy.csv", index=False)
+        else:
+            qy_df.to_csv("results/exp2_qy.csv", index=False)
 
+    experiment1_out = Result.survival_omission(omission_df)
     experiment2_out = Result.survival_qy(qy_df)
