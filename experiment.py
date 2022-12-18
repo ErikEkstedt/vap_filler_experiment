@@ -3,6 +3,7 @@ from torch.nn.utils.rnn import pad_sequence
 import pandas as pd
 
 from os.path import basename, exists, join
+from pathlib import Path
 from glob import glob
 from tqdm import tqdm
 import parselmouth
@@ -545,7 +546,6 @@ class Preprocess:
 
         for speaker in ["A", "B"]:
             other_speaker = "A" if speaker == "B" else "B"
-            channel = 0 if speaker == "A" else 1
 
             # break
             for ii in range(len(info[speaker])):
@@ -1183,18 +1183,21 @@ class Result:
             origin="lower",
             extent=[xmin, xmax, ymin, ymax],
         )
-        ax[1].imshow(
-            spec[1],
-            interpolation="none",
-            aspect="auto",
-            origin="lower",
-            extent=[xmin, xmax, ymin, ymax],
-        )
         ax[0].set_yticks([])
-        ax[1].set_yticks([])
+        if len(ax) > 1:
+            ax[1].imshow(
+                spec[1],
+                interpolation="none",
+                aspect="auto",
+                origin="lower",
+                extent=[xmin, xmax, ymin, ymax],
+            )
+            ax[1].set_yticks([])
 
     @staticmethod
-    def plot_speaker_probs(x, p, ax, label="P", alpha=0.6, colors=["b", "orange"]):
+    def plot_speaker_probs(
+        x, p, ax, label="P", alpha=0.6, colors=["b", "orange"], axis_fontsize=12
+    ):
         px = p - 0.5
         z = torch.zeros_like(p)
         ax.fill_between(
@@ -1205,7 +1208,7 @@ class Result:
         )
         ax.set_ylim([-0.5, 0.5])
         ax.set_yticks([-0.25, 0.25])
-        ax.set_yticklabels(["B", "A"])
+        ax.set_yticklabels(["B", "A"], fontsize=axis_fontsize)
         return ax
 
     @staticmethod
@@ -1214,65 +1217,6 @@ class Result:
         ymin, ymax = ax.get_ylim()
         scale = ymax - ymin
         ax.plot(x, ymin + vad.cpu() * scale, color="w", label=label)
-
-    @staticmethod
-    def plot_one_dialog_two_predicions(
-        waveform,
-        p1,
-        p2=None,
-        vad=None,
-        word_dict=None,
-        plabel=["Filler", "Omission"],
-        relative_start=0,
-        sample_rate=16_000,
-        frame_hz=50,
-        fontsize=12,
-        plot=False,
-    ):
-        assert (
-            waveform.ndim == 2
-        ), f"Expected waveform (C, N_SAMPLES) got {waveform.shape}"
-
-        if p1 is not None:
-            assert p1.ndim == 1, f"Expected p1 (N_FRAMES) got {p1.shape}"
-
-        if p2 is not None:
-            assert p2.ndim == 1, f"Expected p2 (N_FRAMES,) got {p2.shape}"
-
-        time = torch.arange(len(p1)) / frame_hz
-
-        fig, ax = plt.subplots(4, 1, sharex=True)
-        Result.plot_mel_spectrogram(
-            waveform, ax=ax[:2], sample_rate=sample_rate, hop_time=0.01
-        )
-        if vad is not None:
-            Result.plot_vad(time, vad[:, 0], ax[0], label="VAD")
-            Result.plot_vad(time, vad[:, 1], ax[1])
-
-        if word_dict is not None:
-            ymin, ymax = ax[0].get_ylim()
-            span = ymax - ymin
-            mid = ymin + span / 2
-            for s, e, w in zip(
-                word_dict["starts"], word_dict["ends"], word_dict["words"]
-            ):
-                x_mid = s + (e - s) / 2
-                x_text = x_mid - relative_start
-                ax[0].text(x_text, y=mid, s=w, fontsize=fontsize, color="w")
-
-        # Model out
-        Result.plot_speaker_probs(time, p1, ax[2], label=plabel[0])
-        Result.plot_speaker_probs(time, p2, ax[3], label=plabel[1])
-
-        for a in ax:
-            a.legend()
-
-        plt.subplots_adjust(
-            left=0.05, bottom=None, right=0.99, top=0.99, wspace=0.01, hspace=0.05
-        )
-        if plot:
-            plt.pause(0.01)
-        return fig, ax
 
     @staticmethod
     def plot_experiment1_omission(
@@ -1292,6 +1236,8 @@ class Result:
         sample_rate=16_000,
         frame_hz=50,
         figsize=(12, 8),
+        plot_b_audio=True,
+        fontsize={"legend": 13, "duration": 16, "text": 14, "axis": 12},
         plot=False,
     ):
         assert (
@@ -1308,22 +1254,43 @@ class Result:
                 p_omission.ndim == 1
             ), f"Expected p_omission (N_FRAMES,) got {p_omission.shape}"
 
+        if isinstance(rel_filler_end, torch.Tensor):
+            rel_filler_end = rel_filler_end.item()
+
+        if isinstance(rel_filler_start, torch.Tensor):
+            rel_filler_start = rel_filler_start.item()
+
         time = torch.arange(len(p_filler)) / frame_hz
         channel = 0 if speaker == "A" else 1
         other_channel = 0 if channel == 1 else 1
 
-        fig, ax = plt.subplots(4, 1, sharex=True, figsize=figsize)
+        n = 3
+        if plot_b_audio:
+            n = 4
+        fig, ax = plt.subplots(n, 1, sharex=True, figsize=figsize)
 
         # Melspectrogram
-        Result.plot_mel_spectrogram(
-            waveform,
-            ax=[ax[channel], ax[other_channel]],
-            sample_rate=sample_rate,
-            hop_time=0.01,
-        )
+        if plot_b_audio:
+            Result.plot_mel_spectrogram(
+                waveform,
+                ax=[ax[channel], ax[other_channel]],
+                sample_rate=sample_rate,
+                hop_time=0.01,
+            )
+            ax[1].set_ylabel("Audio", fontsize=fontsize["axis"] + 2)
+        else:
+            Result.plot_mel_spectrogram(
+                waveform[channel].unsqueeze(0),
+                ax=[ax[0]],
+                sample_rate=sample_rate,
+                hop_time=0.01,
+            )
+        ax[0].set_ylabel("Audio", fontsize=fontsize["axis"] + 2)
+
         if vad is not None:
             Result.plot_vad(time, vad[:, channel], ax[0], label="VAD")
-            Result.plot_vad(time, vad[:, other_channel], ax[1])
+            if plot_b_audio:
+                Result.plot_vad(time, vad[:, other_channel], ax[1])
 
         # Words
         if word_dict is not None:
@@ -1337,7 +1304,6 @@ class Result:
                 word_dict["ends"],
                 word_dict["words"],
             ):
-
                 row_idx = jj % n_rows
                 y = ys[row_idx]
                 jj += 1
@@ -1347,69 +1313,97 @@ class Result:
                     x=x_mid,
                     y=y,
                     s=w,
-                    fontsize=14,
+                    fontsize=fontsize["text"],
                     color="w",
                     rotation=20,
                     fontweight="bold",
                     horizontalalignment="center",
                 )
+        ax[0].set_yticks([40])
+        ax[0].set_yticklabels(["A"], fontsize=fontsize["axis"])
+
+        if plot_b_audio:
+            ax[1].set_yticks([40])
+            ax[1].set_yticklabels(["B"], fontsize=fontsize["axis"])
 
         # Turn-shift probabilitiesout
         Result.plot_speaker_probs(
-            time, p_filler, ax[2], label=plabel[0] + f" ({filler})"
+            time,
+            p_filler,
+            ax[-2],
+            label=plabel[0] + f" ({filler})",
+            axis_fontsize=fontsize["axis"],
         )
-        Result.plot_speaker_probs(time, p_omission, ax[3], label=plabel[1])
+        Result.plot_speaker_probs(
+            time, p_omission, ax[-1], label=plabel[1], axis_fontsize=fontsize["axis"]
+        )
+        ax[-2].set_ylabel("Prediction", fontsize=fontsize["axis"] + 2)
+        ax[-1].set_ylabel("Prediction", fontsize=fontsize["axis"] + 2)
+        ax[-2].axhline(0, color="k")
+        ax[-1].axhline(0, color="k")
 
         # Show filler boundaries
-        ax[0].axvline(rel_filler_start, color="r", linestyle="dashed")
-        ax[0].axvline(rel_filler_end, color="r")
-        ax[1].axvline(rel_filler_start, color="r", linestyle="dashed")
-        ax[1].axvline(rel_filler_end, color="r")
-        ax[2].axvline(rel_filler_start, color="r", linestyle="dashed")
-        ax[2].axvline(rel_filler_end, color="r")
-        ax[3].axvline(rel_filler_start, color="r", linestyle="dashed")
+        ax[0].axvline(
+            rel_filler_start,
+            color="r",
+            linewidth=2,
+            linestyle="dashed",
+            label="Filler start",
+        )
+        ax[0].axvline(rel_filler_end, color="r", linewidth=2, label="Filler end")
+        ax[0].legend(fontsize=fontsize["legend"])
+        if plot_b_audio:
+            ax[1].axvline(rel_filler_start, color="r", linewidth=2, linestyle="dashed")
+            ax[1].axvline(rel_filler_end, color="r")
+        ax[-2].axvline(rel_filler_start, color="r", linewidth=2, linestyle="dashed")
+        ax[-2].axvline(rel_filler_end, color="r", linewidth=2)
+        ax[-1].axvline(rel_filler_start, color="r", linewidth=2, linestyle="dashed")
 
         # Show cross duration arrows
         ############################################
         y_arrow = -0.25
         if cross_fill >= 0:
-            x_start = rel_filler_end.item()
+
+            x_start = rel_filler_end
             dx = cross_fill / 50
             x_end = x_start + dx
             mid = x_start + dx / 2
             ax[-2].hlines(y=y_arrow, xmin=x_start, xmax=x_end, color="k")
-            ax[-2].vlines(
-                x=[x_start, x_end], ymin=y_arrow - 0.1, ymax=y_arrow + 0.1, color="k"
-            )
+            ax[-2].vlines(x=x_end, ymin=y_arrow - 0.1, ymax=y_arrow + 0.1, color="k")
             ax[-2].text(
                 x=mid,
                 y=y_arrow + 0.05,
                 s=f"{round(dx, 2)}s",
+                fontsize=fontsize["duration"],
                 horizontalalignment="center",
             )
-        ############################################
         if cross_omit >= 0:
-            x_start = rel_filler_start.item()
+            x_start = rel_filler_start
             dx = cross_omit / 50
             x_end = x_start + dx
             mid = x_start + dx / 2
             ax[-1].hlines(y=y_arrow, xmin=x_start, xmax=x_end, color="k")
-            ax[-1].vlines(
-                x=[x_start, x_end], ymin=y_arrow - 0.1, ymax=y_arrow + 0.1, color="k"
-            )
+            ax[-1].vlines(x=x_end, ymin=y_arrow - 0.1, ymax=y_arrow + 0.1, color="k")
             ax[-1].text(
                 x=mid,
                 y=y_arrow + 0.05,
                 s=f"{round(dx, 2)}s",
+                fontsize=fontsize["duration"],
                 horizontalalignment="center",
             )
         ############################################
 
-        from_ax = 0
+        from_ax = 1 if plot_b_audio else 0
         if vad is None:
-            from_ax = 2
+            if plot_b_audio:
+                from_ax = 2
+            else:
+                from_ax = 1
         for a in ax[from_ax:]:
-            a.legend()
+            a.legend(fontsize=fontsize["legend"])
+
+        ax[-1].set_xlabel("time s", fontsize=fontsize["axis"] + 2)
+        plt.xticks(fontsize=fontsize["axis"])
 
         plt.subplots_adjust(
             left=0.05, bottom=None, right=0.99, top=0.99, wspace=0.01, hspace=0.05
@@ -1421,67 +1415,76 @@ class Result:
     @staticmethod
     def plot_experiment2_addition(
         waveform,
-        p,
-        p_addition,
+        p_filler,
+        p_qy,
         speaker,
-        cross,
-        cross_add,
+        cross_fill,
+        cross_qy,
         rel_filler_start,
         rel_filler_end,
-        abs_end,
         filler,
-        plabel=["QY", "QY+F"],
+        filler_start,
+        plabel=["QY-Addition", "QY"],
         vad=None,
         word_dict=None,
         sample_rate=16_000,
         frame_hz=50,
-        plot=False,
         figsize=(12, 8),
+        plot_b_audio=True,
+        fontsize={"legend": 13, "duration": 16, "text": 14, "axis": 12},
+        plot=False,
     ):
-        """
-        waveform:   waveform including the additive filler
-        p:          probs of regular (no-filler) output
-        p_addition: probs of added filler output
-        speaker:    active speaker
-        """
         assert (
             waveform.ndim == 2
         ), f"Expected waveform (C, N_SAMPLES) got {waveform.shape}"
 
-        if p is not None:
-            assert p.ndim == 1, f"Expected p (N_FRAMES) got {p.shape}"
-
-        if p_addition is not None:
+        if p_filler is not None:
             assert (
-                p_addition.ndim == 1
-            ), f"Expected p_addition (N_FRAMES,) got {p_addition.shape}"
+                p_filler.ndim == 1
+            ), f"Expected p_filler (N_FRAMES) got {p_filler.shape}"
 
-        if isinstance(rel_filler_start, torch.Tensor):
-            rel_filler_start = rel_filler_start.item()
+        if p_qy is not None:
+            assert p_qy.ndim == 1, f"Expected p_omission (N_FRAMES,) got {p_qy.shape}"
 
         if isinstance(rel_filler_end, torch.Tensor):
             rel_filler_end = rel_filler_end.item()
 
-        time = torch.arange(len(p_addition)) / frame_hz
+        if isinstance(rel_filler_start, torch.Tensor):
+            rel_filler_start = rel_filler_start.item()
+
+        time = torch.arange(len(p_filler)) / frame_hz
         channel = 0 if speaker == "A" else 1
         other_channel = 0 if channel == 1 else 1
 
-        fig, ax = plt.subplots(4, 1, sharex=True, figsize=figsize)
+        n = 3
+        if plot_b_audio:
+            n = 4
+        fig, ax = plt.subplots(n, 1, sharex=True, figsize=figsize)
 
-        # MelSpectrogram
-        Result.plot_mel_spectrogram(
-            waveform,
-            ax=[ax[channel], ax[other_channel]],
-            sample_rate=sample_rate,
-            hop_time=0.01,
-        )
+        # Melspectrogram
+        if plot_b_audio:
+            Result.plot_mel_spectrogram(
+                waveform,
+                ax=[ax[channel], ax[other_channel]],
+                sample_rate=sample_rate,
+                hop_time=0.01,
+            )
+        else:
+            Result.plot_mel_spectrogram(
+                waveform[channel].unsqueeze(0),
+                ax=[ax[0]],
+                sample_rate=sample_rate,
+                hop_time=0.01,
+            )
+
         if vad is not None:
             Result.plot_vad(time, vad[:, channel], ax[0], label="VAD")
-            Result.plot_vad(time, vad[:, other_channel], ax[1])
+            if plot_b_audio:
+                Result.plot_vad(time, vad[:, other_channel], ax[1])
 
         # Words
         if word_dict is not None:
-            t0 = abs_end - rel_filler_start
+            t0 = filler_start - rel_filler_start
             ys = [50, 40, 30, 20, 10]
             n_rows = len(ys)
 
@@ -1500,69 +1503,113 @@ class Result:
                     x=x_mid,
                     y=y,
                     s=w,
-                    fontsize=14,
+                    fontsize=fontsize["text"],
                     color="w",
                     rotation=20,
                     fontweight="bold",
                     horizontalalignment="center",
                 )
 
-        # Model out
-        Result.plot_speaker_probs(time, p, ax[2], label=plabel[0])
+            row_idx = jj % n_rows
+            y = ys[row_idx]
+            x_mid = rel_filler_start + (rel_filler_end - rel_filler_start) / 2
+            ax[0].text(
+                x=x_mid,
+                y=y,
+                s=filler,
+                fontsize=fontsize["text"],
+                color="w",
+                rotation=20,
+                fontweight="bold",
+                horizontalalignment="center",
+            )
+
+        ax[0].set_yticks([40])
+        ax[0].set_yticklabels(["A"], fontsize=fontsize["axis"])
+        ax[0].set_ylabel("Audio", fontsize=fontsize["axis"] + 2)
+
+        if plot_b_audio:
+            ax[1].set_yticks([40])
+            ax[1].set_yticklabels(["B"], fontsize=fontsize["axis"])
+
+        # Turn-shift probabilitiesout
         Result.plot_speaker_probs(
-            time, p_addition, ax[3], label=plabel[1] + f" ({filler})"
+            time,
+            p_filler,
+            ax[-2],
+            label=plabel[0] + f" ({filler})",
+            axis_fontsize=fontsize["axis"],
         )
+        Result.plot_speaker_probs(
+            time, p_qy, ax[-1], label=plabel[1], axis_fontsize=fontsize["axis"]
+        )
+        ax[-2].axhline(0, color="k")
+        ax[-1].axhline(0, color="k")
+        ax[-2].set_ylabel("Prediction", fontsize=fontsize["axis"] + 2)
+        ax[-1].set_ylabel("Prediction", fontsize=fontsize["axis"] + 2)
 
         # Show filler boundaries
-        ax[0].axvline(rel_filler_start, color="r", linestyle="dashed")
-        ax[0].axvline(rel_filler_end, color="r")
-        ax[1].axvline(rel_filler_start, color="r", linestyle="dashed")
-        ax[1].axvline(rel_filler_end, color="r")
-        ax[2].axvline(rel_filler_start, color="r", linestyle="dashed")
-        ax[3].axvline(rel_filler_start, color="r", linestyle="dashed")
-        ax[3].axvline(rel_filler_end, color="r")
+        ax[0].axvline(
+            rel_filler_start,
+            color="r",
+            linewidth=2,
+            linestyle="dashed",
+            label="Filler start",
+        )
+        ax[0].axvline(rel_filler_end, color="r", linewidth=2, label="Filler end")
+        ax[0].legend(fontsize=fontsize["legend"])
+        if plot_b_audio:
+            ax[1].axvline(rel_filler_start, color="r", linewidth=2, linestyle="dashed")
+            ax[1].axvline(rel_filler_end, color="r")
+        ax[-2].axvline(rel_filler_start, color="r", linewidth=2, linestyle="dashed")
+        ax[-2].axvline(rel_filler_end, color="r", linewidth=2)
+        ax[-1].axvline(rel_filler_start, color="r", linewidth=2, linestyle="dashed")
 
         # Show cross duration arrows
         ############################################
         y_arrow = -0.25
-        if cross >= 0:
-            x_start = rel_filler_start
-            dx = cross / 50
+        if cross_fill >= 0:
+
+            x_start = rel_filler_end
+            dx = cross_fill / 50
             x_end = x_start + dx
             mid = x_start + dx / 2
             ax[-2].hlines(y=y_arrow, xmin=x_start, xmax=x_end, color="k")
-            ax[-2].vlines(
-                x=[x_start, x_end], ymin=y_arrow - 0.1, ymax=y_arrow + 0.1, color="k"
-            )
+            ax[-2].vlines(x=x_end, ymin=y_arrow - 0.1, ymax=y_arrow + 0.1, color="k")
             ax[-2].text(
                 x=mid,
                 y=y_arrow + 0.05,
                 s=f"{round(dx, 2)}s",
+                fontsize=fontsize["duration"],
                 horizontalalignment="center",
             )
-        ############################################
-        if cross_add >= 0:
-            x_start = rel_filler_end
-            dx = cross_add / frame_hz
+        if cross_qy >= 0:
+            x_start = rel_filler_start
+            dx = cross_qy / 50
             x_end = x_start + dx
             mid = x_start + dx / 2
             ax[-1].hlines(y=y_arrow, xmin=x_start, xmax=x_end, color="k")
-            ax[-1].vlines(
-                x=[x_start, x_end], ymin=y_arrow - 0.1, ymax=y_arrow + 0.1, color="k"
-            )
+            ax[-1].vlines(x=x_end, ymin=y_arrow - 0.1, ymax=y_arrow + 0.1, color="k")
             ax[-1].text(
                 x=mid,
                 y=y_arrow + 0.05,
                 s=f"{round(dx, 2)}s",
+                fontsize=fontsize["duration"],
                 horizontalalignment="center",
             )
         ############################################
 
-        from_ax = 0
+        from_ax = 1 if plot_b_audio else 0
         if vad is None:
-            from_ax = 2
+            if plot_b_audio:
+                from_ax = 2
+            else:
+                from_ax = 1
         for a in ax[from_ax:]:
-            a.legend()
+            a.legend(fontsize=fontsize["legend"])
+
+        ax[-1].set_xlabel("time s", fontsize=fontsize["axis"] + 2)
+        plt.xticks(fontsize=fontsize["axis"])
 
         plt.subplots_adjust(
             left=0.05, bottom=None, right=0.99, top=0.99, wspace=0.01, hspace=0.05
@@ -1570,6 +1617,10 @@ class Result:
         if plot:
             plt.pause(0.01)
         return fig, ax
+
+    @staticmethod
+    def save_all_fillers(root="results/filler"):
+        Path(root).mkdir(parents=True, exist_ok=True)
 
 
 def visualize_debuggin():
@@ -1593,6 +1644,7 @@ def visualize_debuggin():
         )
         if crosses["filler_now_cross"] == -1 and crosses["omit_now_cross"] == -1:
             continue
+        print(ii)
         ###########################################
         # Plot the output from the model
         ###########################################
@@ -1682,11 +1734,230 @@ def visualize_debuggin():
             ax[-1].set_xlim([stime, 25])
             plt.show()
 
-    return cross
 
-    cross = -1
-    if len(cross_idx) > 0:
-        cross = cross_idx[0].cpu().item()
+def exp1_visualize_specific():
+    def plot_single(sample, exp):
+        x, rel_filler_start, rel_filler_end = exp.get_filler_omission_sample(sample)
+        out = exp.model.probs(x.to(exp.model.device))
+        crosses = exp.get_filler_omission_cross(
+            sample, out, rel_filler_start, rel_filler_end
+        )
+        channel = 0 if sample.speaker == "A" else 1
+        p_now = out["p_now"][..., channel].cpu()
+        utt = exp.utt_df[exp.utt_df["utt_idx"] == sample.utt_idx].iloc[0]
+        ###########################################
+        # Plot the output from the model
+        ###########################################
+        plt.close("all")
+        fig, ax = Result.plot_experiment1_omission(
+            x[0],
+            p_filler=p_now[0],
+            p_omission=p_now[1],
+            speaker=sample.speaker,
+            rel_filler_start=rel_filler_start,
+            rel_filler_end=rel_filler_end,
+            cross_fill=crosses["filler_now_cross"],
+            cross_omit=crosses["omit_now_cross"],
+            filler=sample.filler,
+            filler_start=sample.start,
+            plot_b_audio=False,
+            word_dict={
+                "starts": utt.starts[: sample.utt_loc + 1],
+                "ends": utt.ends[: sample.utt_loc + 1],
+                "words": utt.words[: sample.utt_loc + 1],
+            },
+            figsize=(12, 8),
+            fontsize={"legend": 14, "duration": 16, "text": 14, "axis": 14},
+        )
+        return fig, ax
+
+    exp = Experiment()
+    exp.load_model()
+
+    om_df = pd.read_csv("results/exp1_omission.csv")
+    good = [1, 1775, 4229, 773, 4869, 4327, 610, 4101]
+    starts = [17.8, 17.2, 16.9, 16.9, 17.3, 17.45, 17.09, 18.5]
+
+    # maybe = [3881, 4580, 314, 3191]
+    # strong_hold = [1175]
+
+    for jj in range(len(good)):
+        ii = good[jj]
+        ss = starts[jj]
+        sample = om_df.iloc[ii]
+        plt.close("all")
+        fig, ax = plot_single(sample, exp)
+        ax[-1].set_xlim([ss, 28])
+        fig.savefig(f"results/images/omission/ex_omision_{jj}_{ii}.png")
+        # plt.show()
+        # plt.pause(0.1)
+
+    while True:
+        ii = torch.randint(0, len(om_df), (1,)).item()
+        print(ii)
+        sample = om_df.iloc[ii]
+        x, rel_filler_start, rel_filler_end = exp.get_filler_omission_sample(sample)
+        out = exp.model.probs(x.to(exp.model.device))
+        crosses = exp.get_filler_omission_cross(
+            sample, out, rel_filler_start, rel_filler_end
+        )
+        channel = 0 if sample.speaker == "A" else 1
+        p_now = out["p_now"][..., channel].cpu()
+        utt = exp.utt_df[exp.utt_df["utt_idx"] == sample.utt_idx].iloc[0]
+        ###########################################
+        # Plot the output from the model
+        ###########################################
+        plt.close("all")
+        fig, ax = Result.plot_experiment1_omission(
+            x[0],
+            p_filler=p_now[0],
+            p_omission=p_now[1],
+            speaker=sample.speaker,
+            rel_filler_start=rel_filler_start,
+            rel_filler_end=rel_filler_end,
+            cross_fill=crosses["filler_now_cross"],
+            cross_omit=crosses["omit_now_cross"],
+            filler=sample.filler,
+            filler_start=sample.start,
+            plot_b_audio=False,
+            word_dict={
+                "starts": utt.starts[: sample.utt_loc + 1],
+                "ends": utt.ends[: sample.utt_loc + 1],
+                "words": utt.words[: sample.utt_loc + 1],
+            },
+            figsize=(12, 8),
+            fontsize={"legend": 14, "duration": 16, "text": 14, "axis": 14},
+        )
+        ax[-1].set_xlim([17, 28])
+        ############################################
+        plt.pause(0.1)
+        input()
+
+
+def exp2_visualize_specific():
+    def load_qy(path="results/exp2_qy.csv"):
+        def _text(x):
+            return [a[1:-1] for a in x.strip("][").split(", ")]
+
+        def _time(x):
+            if isinstance(x, str):
+                if len(x) > 0:
+                    return json.loads(x)
+            return x
+
+        converters = {
+            "da": _text,
+            "da_boi": _text,
+            "words": _text,
+            "starts": _time,
+            "ends": _time,
+        }
+        return pd.read_csv(path, converters=converters)
+
+    def plot_single(ii, fill_idx, exp, Q, F):
+        sample = Q.iloc[ii]
+        fillers = F[F["q_idx"] == sample.q_idx]
+
+        # Find fillers used for that QY
+        x, sil_start_frames = exp.get_filler_addition_sample(sample, fillers)
+        channel = 0 if sample.speaker == "A" else 1
+        crosses, _, p_now, _ = exp.get_batch_crosses(
+            x, sil_start_frames, channel, include_probs=True
+        )
+
+        plt.close("all")
+        fig, ax = Result.plot_experiment2_addition(
+            x[fill_idx],
+            p_filler=p_now[fill_idx],
+            p_qy=p_now[0],
+            speaker=sample.speaker,
+            rel_filler_start=sil_start_frames[0].item() / exp.frame_hz,
+            rel_filler_end=sil_start_frames[fill_idx].item() / exp.frame_hz,
+            cross_fill=crosses[fill_idx],
+            cross_qy=crosses[0],
+            filler=fillers.iloc[fill_idx - 1].filler,
+            filler_start=sample.end,
+            plot_b_audio=False,
+            word_dict={
+                "starts": sample.starts,
+                "ends": sample.ends,
+                "words": sample.words,
+            },
+            figsize=(12, 8),
+            fontsize={"legend": 14, "duration": 16, "text": 14, "axis": 14},
+        )
+        ax[-1].set_xlim([17, 28])
+        return fig, ax
+
+    exp = Experiment()
+    exp.load_model()
+
+    good_paper = [
+        (32, 2),
+        (46, 1),
+        (46, 2),
+        (68, 1),
+        (80, 2),
+        (204, 4),
+        (210, 1),
+        (215, 1),
+        (216, 1),
+        (232, 1),
+        (232, 2),
+    ]
+    starts = [18, 17.8, 17.8, 17.8, 17.8, 18.4, 18.15, 17, 15.95, 19, 19]
+
+    qy_df = load_qy()
+    Q = qy_df[qy_df["q_is_filler"] == 0]
+    F = qy_df[qy_df["q_is_filler"] == 1]
+
+    for jj in range(0, len(good_paper)):
+        # ii, fill_idx = good[1]
+        print(jj)
+        ii, fill_idx = good_paper[jj]
+        ss = starts[jj]
+        fig, ax = plot_single(ii, fill_idx, exp, Q, F)
+        ax[-1].set_xlim([ss, 25])
+        fig.savefig(f"results/images/ex_addition_{jj}_{ii}_{fill_idx}.png")
+        plt.close("all")
+
+    # while True:
+    #     fill_idx = 3
+
+    while True:
+        ii = torch.randint(0, len(Q), (1,))[0].item()
+        sample = Q.iloc[ii]
+        fillers = F[F["q_idx"] == sample.q_idx]
+        x, sil_start_frames = exp.get_filler_addition_sample(sample, fillers)
+        channel = 0 if sample.speaker == "A" else 1
+        crosses, _, p_now, _ = exp.get_batch_crosses(
+            x, sil_start_frames, channel, include_probs=True
+        )
+        for fill_idx in range(1, len(p_now)):
+            plt.close("all")
+            print("(ii, fill_idx) ", (ii, fill_idx))
+            fig, ax = Result.plot_experiment2_addition(
+                x[fill_idx],
+                p_filler=p_now[fill_idx],
+                p_qy=p_now[0],
+                speaker=sample.speaker,
+                rel_filler_start=sil_start_frames[0].item() / exp.frame_hz,
+                rel_filler_end=sil_start_frames[fill_idx].item() / exp.frame_hz,
+                cross_fill=crosses[fill_idx],
+                cross_qy=crosses[0],
+                filler=fillers.iloc[fill_idx - 1].filler,
+                filler_start=sample.end,
+                plot_b_audio=False,
+                word_dict={
+                    "starts": sample.starts,
+                    "ends": sample.ends,
+                    "words": sample.words,
+                },
+                figsize=(12, 8),
+                fontsize={"legend": 14, "duration": 16, "text": 14, "axis": 14},
+            )
+            ax[-1].set_xlim([17, 28])
+            plt.show()
 
 
 if __name__ == "__main__":
